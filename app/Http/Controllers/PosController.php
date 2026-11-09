@@ -2,10 +2,8 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\DataMenu;
+use App\Models\dataMenu;
 use App\Models\Kategori;
-use App\Models\Transaction;
-use App\Models\TransactionDetail;
 use App\Models\Transaksi;
 use App\Models\TransaksiDetail;
 use Illuminate\Http\Request;
@@ -14,12 +12,14 @@ use Illuminate\Support\Str;
 
 class PosController extends Controller
 {
-    // Menampilkan halaman POS
+    /**
+     * Menampilkan halaman POS (Katalog menu dan Keranjang belanja)
+     */
     public function index(Request $request)
     {
-        $DataMenu = DataMenu::with('kategori')
+        $DataMenu = dataMenu::with('kategori')
             ->when($request->search, function ($query, $search) {
-                $query->where('nama', 'like', "%{$search}%");
+                $query->where('nama_menu', 'like', "%{$search}%");
             })
             ->when($request->category_id, function ($query, $categoryId) {
                 $query->where('kategori_id', $categoryId);
@@ -43,15 +43,20 @@ class PosController extends Controller
         ));
     }
 
-
-    // Menambahkan menu ke keranjang
+    /**
+     * Menambahkan menu ke keranjang
+     */
     public function add(Request $request)
     {
         $request->validate([
             'menu_id' => 'required|exists:data_menus,id',
         ]);
 
-        $menu = DataMenu::findOrFail($request->menu_id);
+        $menu = dataMenu::findOrFail($request->menu_id);
+
+        if ($menu->stock <= 0) {
+            return back()->with('error', 'Stok menu ' . $menu->nama_menu . ' telah habis.');
+        }
 
         $cart = session()->get('cart', []);
 
@@ -60,23 +65,25 @@ class PosController extends Controller
             : 1;
 
         if ($quantity > $menu->stock) {
-            return back()->with('error', 'Stok menu tidak mencukupi.');
+            return back()->with('error', 'Stok ' . $menu->nama_menu . ' tidak mencukupi (sisa ' . $menu->stock . ').');
         }
 
         $cart[$menu->id] = [
-            'nama' => $menu->nama,
-            'price' => $menu->price,
+            'id' => $menu->id,
+            'nama' => $menu->nama_menu,
+            'price' => (float) $menu->harga,
             'quantity' => $quantity,
             'stock' => $menu->stock,
         ];
 
         session()->put('cart', $cart);
 
-        return back()->with('success', 'Menu berhasil ditambahkan.');
+        return back()->with('success', 'Menu ' . $menu->nama_menu . ' berhasil ditambahkan ke keranjang.');
     }
 
-
-    // Mengubah jumlah menu
+    /**
+     * Mengubah jumlah menu di keranjang
+     */
     public function update(Request $request, string $id)
     {
         $request->validate([
@@ -89,13 +96,13 @@ class PosController extends Controller
             return back()->with('error', 'Menu tidak ditemukan di keranjang.');
         }
 
-        $menu = DataMenu::findOrFail($id);
+        $menu = dataMenu::findOrFail($id);
 
         if ($request->quantity > $menu->stock) {
-            return back()->with('error', 'Jumlah pesanan melebihi stok.');
+            return back()->with('error', 'Jumlah pesanan melebihi stok yang tersedia (sisa ' . $menu->stock . ').');
         }
 
-        $cart[$id]['quantity'] = $request->quantity;
+        $cart[$id]['quantity'] = (int) $request->quantity;
         $cart[$id]['stock'] = $menu->stock;
 
         session()->put('cart', $cart);
@@ -103,21 +110,35 @@ class PosController extends Controller
         return back()->with('success', 'Jumlah menu berhasil diperbarui.');
     }
 
-
-    // Menghapus menu dari keranjang
+    /**
+     * Menghapus 1 menu dari keranjang
+     */
     public function remove(string $id)
     {
         $cart = session()->get('cart', []);
 
-        unset($cart[$id]);
+        if (isset($cart[$id])) {
+            $nama = $cart[$id]['nama'] ?? 'Menu';
+            unset($cart[$id]);
+            session()->put('cart', $cart);
+            return back()->with('success', $nama . ' berhasil dihapus dari keranjang.');
+        }
 
-        session()->put('cart', $cart);
-
-        return back()->with('success', 'Menu berhasil dihapus dari keranjang.');
+        return back()->with('error', 'Item tidak ditemukan di keranjang.');
     }
 
+    /**
+     * Mengosongkan seluruh keranjang belanja
+     */
+    public function clear()
+    {
+        session()->forget('cart');
+        return back()->with('success', 'Keranjang belanja berhasil dikosongkan.');
+    }
 
-    // Menyimpan transaksi
+    /**
+     * Menyimpan transaksi (Checkout)
+     */
     public function checkout(Request $request)
     {
         $cart = session()->get('cart', []);
@@ -132,46 +153,49 @@ class PosController extends Controller
 
         $request->validate([
             'paid' => 'required|numeric|min:' . $total,
+            'metode_pembayaran' => 'nullable|in:Tunai,QRIS,Debit',
+        ], [
+            'paid.required' => 'Nominal uang pembayaran wajib diisi.',
+            'paid.numeric' => 'Nominal uang pembayaran harus berupa angka.',
+            'paid.min' => 'Uang pembayaran kurang dari total tagihan (Rp' . number_format($total, 0, ',', '.') . ').',
         ]);
 
         try {
-
             $transaction = DB::transaction(function () use ($cart, $total, $request) {
-
-                // Memeriksa stok terbaru
+                // 1. Validasi ketersediaan stok terbaru
                 foreach ($cart as $id => $item) {
-                    $menu = DataMenu::whereKey($id)
+                    $menu = dataMenu::whereKey($id)
                         ->lockForUpdate()
                         ->firstOrFail();
 
                     if ($menu->stock < $item['quantity']) {
                         throw new \Exception(
-                            'Stok ' . $menu->nama . ' tidak mencukupi.'
+                            'Stok ' . $menu->nama_menu . ' tidak mencukupi (sisa: ' . $menu->stock . ').'
                         );
                     }
                 }
 
-                // Membuat transaksi utama
+                // 2. Simpan transaksi utama
                 $transaction = Transaksi::create([
-                    'invoice' => 'INV-' . date('YmdHis') . '-' . Str::upper(Str::random(4)),
-                    'user_id' => auth()->$id,
-                    'total' => $total,
-                    'paid' => $request->paid,
-                    'change' => $request->paid - $total,
+                    'invoice_number' => 'INV-' . date('YmdHis') . '-' . Str::upper(Str::random(4)),
+                    'user_id' => auth()->id(),
+                    'totalharga' => $total,
+                    'uang_bayar' => $request->paid,
+                    'metode_pembayaran' => $request->metode_pembayaran ?? 'Tunai',
+                    'kembalian' => $request->paid - $total,
+                    'tanggal_transaksi' => now()->toDateString(),
                 ]);
 
-                // Menyimpan detail dan mengurangi stok
+                // 3. Simpan detail item dan kurangi stok
                 foreach ($cart as $id => $item) {
-
                     TransaksiDetail::create([
-                        'transaction_id' => $transaction->id,
-                        'menu_id' => $id,
-                        'quantity' => $item['quantity'],
-                        'price' => $item['price'],
-                        'subtotal' => $item['price'] * $item['quantity'],
+                        'transaksi_id' => $transaction->id,
+                        'data_menu_id' => $id,
+                        'jumlah' => $item['quantity'],
+                        'harga' => $item['price'],
                     ]);
 
-                    DataMenu::whereKey($id)->decrement(
+                    dataMenu::whereKey($id)->decrement(
                         'stock',
                         $item['quantity']
                     );
@@ -180,16 +204,15 @@ class PosController extends Controller
                 return $transaction;
             });
 
-            // Mengosongkan keranjang setelah transaksi berhasil
+            // 4. Kosongkan keranjang belanja
             session()->forget('cart');
 
             return redirect()
                 ->route('reports.show', $transaction->id)
-                ->with('success', 'Transaksi berhasil disimpan.');
+                ->with('success', 'Transaksi berhasil disimpan. No. Invoice: ' . $transaction->invoice_number);
 
         } catch (\Exception $e) {
-
-            return back()->with('error', $e->getMessage());
+            return back()->with('error', 'Gagal memproses transaksi: ' . $e->getMessage());
         }
     }
 }

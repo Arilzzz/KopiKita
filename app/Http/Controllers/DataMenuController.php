@@ -2,7 +2,7 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\DataMenu;
+use App\Models\dataMenu;
 use App\Models\Kategori;
 use Illuminate\Http\Request;
 
@@ -11,7 +11,7 @@ class DataMenuController extends Controller
     // 1. Menampilkan Data Menu
     public function index(Request $request)
     {
-        $DataMenu = DataMenu::with('kategori')
+        $DataMenu = dataMenu::with('kategori')
             ->when($request->search, function ($query, $search) {
                 $query->where('nama_menu', 'like', "%{$search}%");
             })
@@ -27,7 +27,7 @@ class DataMenuController extends Controller
         // Menghitung jumlah kategori menu
         $jumlahKategori = Kategori::count();
 
-        $jumlahMenu = DataMenu::count();
+        $jumlahMenu = dataMenu::count();
 
         return view('DataMenu.index', compact(
             'DataMenu',
@@ -37,7 +37,6 @@ class DataMenuController extends Controller
         ));
     }
 
-
     // 2. Menampilkan Form Tambah Menu
     public function create()
     {
@@ -45,7 +44,6 @@ class DataMenuController extends Controller
 
         return view('DataMenu.create', compact('categories'));
     }
-
 
     // 3. Menyimpan Menu Baru
     public function store(Request $request)
@@ -57,7 +55,7 @@ class DataMenuController extends Controller
             'stock' => 'required|integer|min:0',
         ]);
 
-        DataMenu::create([
+        dataMenu::create([
             'nama_menu' => $request->nama_menu,
             'kategori_id' => $request->kategori_id,
             'harga' => $request->harga,
@@ -69,9 +67,8 @@ class DataMenuController extends Controller
             ->with('success', 'Menu berhasil ditambahkan.');
     }
 
-
     // 4. Menampilkan Form Edit Menu
-    public function edit(DataMenu $DataMenu)
+    public function edit(dataMenu $DataMenu)
     {
         $categories = Kategori::all();
 
@@ -81,9 +78,8 @@ class DataMenuController extends Controller
         ));
     }
 
-
     // 5. Memperbarui Menu
-    public function update(Request $request, DataMenu $DataMenu)
+    public function update(Request $request, dataMenu $DataMenu)
     {
         $request->validate([
             'nama_menu' => 'required|string|max:100',
@@ -104,11 +100,10 @@ class DataMenuController extends Controller
             ->with('success', 'Menu berhasil diperbarui.');
     }
 
-
     // 6. Menghapus Menu
-    public function destroy(DataMenu $menu)
+    public function destroy(dataMenu $DataMenu)
     {
-        $menu->delete();
+        $DataMenu->delete();
 
         return redirect()
             ->route('DataMenu.index')
